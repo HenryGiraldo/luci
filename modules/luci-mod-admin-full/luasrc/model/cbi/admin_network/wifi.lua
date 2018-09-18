@@ -173,6 +173,7 @@ else
 	ch.hwmodes = hw_modes
 	ch.htmodes = iw.htmodelist
 	ch.freqlist = iw.freqlist
+	ch.hostapd_acs = (os.execute("hostapd -vacs >/dev/null 2>/dev/null") == 0)
 	ch.template = "cbi/wireless_modefreq"
 
 	function ch.cfgvalue(self, section)
