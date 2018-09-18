@@ -7,17 +7,6 @@ local ut = require "luci.util"
 local nt = require "luci.sys".net
 local fs = require "nixio.fs"
 
-local acct_port, acct_secret, acct_server, anonymous_identity, ant1, ant2,
-	auth, auth_port, auth_secret, auth_server, bssid, cacert, cacert2,
-	cc, ch, cipher, clientcert, clientcert2, ea, eaptype, en, encr,
-	ft_protocol, ft_psk_generate_local, hidden, htmode, identity,
-	ieee80211r, ieee80211w, ifname, isolate, key_retries,
-	legacyrates, max_timeout, meshfwd, meshid, ml, mobility_domain, mode,
-	mp, nasid, network, password, pmk_r1_push, privkey, privkey2, privkeypwd,
-	privkeypwd2, r0_key_lifetime, r0kh, r1_key_holder, r1kh,
-	reassociation_deadline, retry_timeout, ssid, st, tp, wepkey, wepslot,
-	wmm, wpakey, wps, disassoc_low_ack, short_preamble, beacon_int, dtim_period
-
 arg[1] = arg[1] or ""
 
 m = Map("wireless", "",
@@ -30,6 +19,16 @@ m:chain("network")
 m:chain("firewall")
 m.redirect = luci.dispatcher.build_url("admin/network/wireless")
 
+local ifsection
+
+function m.on_commit(map)
+	local wnet = nw:get_wifinet(arg[1])
+	if ifsection and wnet then
+		ifsection.section = wnet.sid
+		m.title = luci.util.pcdata(wnet:get_i18n())
+	end
+end
+
 nw.init(m.uci)
 
 local wnet = nw:get_wifinet(arg[1])
@@ -40,6 +39,38 @@ if not wnet or not wdev then
 	luci.http.redirect(luci.dispatcher.build_url("admin/network/wireless"))
 	return
 end
+
+-- wireless toggle was requested, commit and reload page
+function m.parse(map)
+	local new_cc = m:formvalue("cbid.wireless.%s.country" % wdev:name())
+	local old_cc = m:get(wdev:name(), "country")
+
+	if m:formvalue("cbid.wireless.%s.__toggle" % wdev:name()) then
+		if wdev:get("disabled") == "1" or wnet:get("disabled") == "1" then
+			wnet:set("disabled", nil)
+		else
+			wnet:set("disabled", "1")
+		end
+		wdev:set("disabled", nil)
+
+		nw:commit("wireless")
+		luci.sys.call("(env -i /bin/ubus call network reload) >/dev/null 2>/dev/null")
+
+		luci.http.redirect(luci.dispatcher.build_url("admin/network/wireless", arg[1]))
+		return
+	end
+
+	Map.parse(map)
+
+	if m:get(wdev:name(), "type") == "mac80211" and new_cc and new_cc ~= old_cc then
+		luci.sys.call("iw reg set %q" % new_cc)
+		luci.http.redirect(luci.dispatcher.build_url("admin/network/wireless", arg[1]))
+		return
+	end
+end
+
+m.title = luci.util.pcdata(wnet:get_i18n())
+
 
 local function txpower_list(iw)
 	local list = iw.txpwrlist or { }
@@ -81,57 +112,6 @@ local hw_modes      = iw.hwmodelist or { }
 local tx_power_list = txpower_list(iw)
 local tx_power_cur  = txpower_current(wdev:get("txpower"), tx_power_list)
 
--- wireless toggle was requested, commit and reload page
-function m.parse(map)
-	local new_cc = m:formvalue("cbid.wireless.%s.country" % wdev:name())
-	local old_cc = m:get(wdev:name(), "country")
-
-	if m:formvalue("cbid.wireless.%s.__toggle" % wdev:name()) then
-		if wdev:get("disabled") == "1" or wnet:get("disabled") == "1" then
-			wnet:set("disabled", nil)
-		else
-			wnet:set("disabled", "1")
-		end
-		wdev:set("disabled", nil)
-		m.apply_needed = true
-		m.redirect = nil
-	end
-
-	Map.parse(map)
-
-	if m:get(wdev:name(), "type") == "mac80211" and new_cc and new_cc ~= old_cc then
-		luci.sys.call("iw reg set %s" % ut.shellquote(new_cc))
-
-		local old_ch = tonumber(m:formvalue("cbid.wireless.%s._mode_freq.channel" % wdev:name()) or "")
-		if old_ch then
-			local _, c, new_ch
-			for _, c in ipairs(iw.freqlist) do
-				if c.channel > old_ch or (old_ch <= 14 and c.channel > 14) then
-					break
-				end
-				new_ch = c.channel
-			end
-			if new_ch ~= old_ch then
-				wdev:set("channel", new_ch)
-				m.message = translatef("Channel %d is not available in the %s regulatory domain and has been auto-adjusted to %d.",
-					old_ch, new_cc, new_ch)
-			end
-		end
-	end
-
-	if wdev:get("disabled") == "1" or wnet:get("disabled") == "1" then
-		en.title      = translate("Wireless network is disabled")
-		en.inputtitle = translate("Enable")
-		en.inputstyle = "apply"
-	else
-		en.title      = translate("Wireless network is enabled")
-		en.inputtitle = translate("Disable")
-		en.inputstyle = "reset"
-	end
-end
-
-m.title = luci.util.pcdata(wnet:get_i18n())
-
 s = m:section(NamedSection, wdev:name(), "wifi-device", translate("Device Configuration"))
 s.addremove = false
 
@@ -139,11 +119,28 @@ s:tab("general", translate("General Setup"))
 s:tab("macfilter", translate("MAC-Filter"))
 s:tab("advanced", translate("Advanced Settings"))
 
+--[[
+back = s:option(DummyValue, "_overview", translate("Overview"))
+back.value = ""
+back.titleref = luci.dispatcher.build_url("admin", "network", "wireless")
+]]
+
 st = s:taboption("general", DummyValue, "__status", translate("Status"))
 st.template = "admin_network/wifi_status"
 st.ifname   = arg[1]
 
 en = s:taboption("general", Button, "__toggle")
+
+if wdev:get("disabled") == "1" or wnet:get("disabled") == "1" then
+	en.title      = translate("Wireless network is disabled")
+	en.inputtitle = translate("Enable")
+	en.inputstyle = "apply"
+else
+	en.title      = translate("Wireless network is enabled")
+	en.inputtitle = translate("Disable")
+	en.inputstyle = "reset"
+end
+
 
 local hwtype = wdev:get("type")
 
@@ -173,7 +170,10 @@ if found_sta then
 		found_sta.channel or "(auto)", table.concat(found_sta.names, ", "))
 else
 	ch = s:taboption("general", Value, "_mode_freq", '<br />'..translate("Operating frequency"))
-	ch.iwinfo = iw
+	ch.hwmodes = hw_modes
+	ch.htmodes = iw.htmodelist
+	ch.freqlist = iw.freqlist
+	ch.hostapd_acs = (os.execute("hostapd -vacs >/dev/null 2>/dev/null") == 0)
 	ch.template = "cbi/wireless_modefreq"
 
 	function ch.cfgvalue(self, section)
@@ -229,10 +229,6 @@ if hwtype == "mac80211" then
 		s:taboption("advanced", Value, "country", translate("Country Code"), translate("Use ISO/IEC 3166 alpha2 country codes."))
 	end
 
-	legacyrates = s:taboption("advanced", Flag, "legacy_rates", translate("Allow legacy 802.11b rates"))
-	legacyrates.rmempty = false
-	legacyrates.default = "1"
-
 	s:taboption("advanced", Value, "distance", translate("Distance Optimization"),
 		translate("Distance to farthest network member in meters."))
 
@@ -250,15 +246,65 @@ if hwtype == "mac80211" then
 
 	s:taboption("advanced", Value, "frag", translate("Fragmentation Threshold"))
 	s:taboption("advanced", Value, "rts", translate("RTS/CTS Threshold"))
-	
-	s:taboption("advanced", Flag, "noscan", translate("Force 40MHz mode"),
-		translate("Always use 40MHz channels even if the secondary channel overlaps. Using this option does not comply with IEEE 802.11n-2009!")).optional = true
-
-	beacon_int = s:taboption("advanced", Value, "beacon_int", translate("Beacon Interval"))
-	beacon_int.optional = true
-	beacon_int.placeholder = 100
-	beacon_int.datatype = "range(15,65535)"
 end
+
+
+------------------- Madwifi Device ------------------
+
+if hwtype == "atheros" then
+	tp = s:taboption("general",
+		(#tx_power_list > 0) and ListValue or Value,
+		"txpower", translate("Transmit Power"), "dBm")
+
+	tp.rmempty = true
+	tp.default = tx_power_cur
+
+	function tp.cfgvalue(...)
+		return txpower_current(Value.cfgvalue(...), tx_power_list)
+	end
+
+	tp:value("", translate("auto"))
+	for _, p in ipairs(tx_power_list) do
+		tp:value(p.driver_dbm, "%i dBm (%i mW)"
+			%{ p.display_dbm, p.display_mw })
+	end
+
+	s:taboption("advanced", Flag, "diversity", translate("Diversity")).rmempty = false
+
+	if not nsantenna then
+		ant1 = s:taboption("advanced", ListValue, "txantenna", translate("Transmitter Antenna"))
+		ant1.widget = "radio"
+		ant1.orientation = "horizontal"
+		ant1:depends("diversity", "")
+		ant1:value("0", translate("auto"))
+		ant1:value("1", translate("Antenna 1"))
+		ant1:value("2", translate("Antenna 2"))
+
+		ant2 = s:taboption("advanced", ListValue, "rxantenna", translate("Receiver Antenna"))
+		ant2.widget = "radio"
+		ant2.orientation = "horizontal"
+		ant2:depends("diversity", "")
+		ant2:value("0", translate("auto"))
+		ant2:value("1", translate("Antenna 1"))
+		ant2:value("2", translate("Antenna 2"))
+
+	else -- NanoFoo
+		local ant = s:taboption("advanced", ListValue, "antenna", translate("Transmitter Antenna"))
+		ant:value("auto")
+		ant:value("vertical")
+		ant:value("horizontal")
+		ant:value("external")
+	end
+
+	s:taboption("advanced", Value, "distance", translate("Distance Optimization"),
+		translate("Distance to farthest network member in meters."))
+	s:taboption("advanced", Value, "regdomain", translate("Regulatory Domain"))
+	s:taboption("advanced", Value, "country", translate("Country Code"))
+	s:taboption("advanced", Flag, "outdoor", translate("Outdoor Channels"))
+
+	--s:option(Flag, "nosbeacon", translate("Disable HW-Beacon timer"))
+end
+
 
 
 ------------------- Broadcom Device ------------------
@@ -350,6 +396,7 @@ end
 ----------------------- Interface -----------------------
 
 s = m:section(NamedSection, wnet.sid, "wifi-iface", translate("Interface Configuration"))
+ifsection = s
 s.addremove = false
 s.anonymous = true
 s.defaults.device = wdev:name()
@@ -368,7 +415,7 @@ mode:value("adhoc", translate("Ad-Hoc"))
 meshid = s:taboption("general", Value, "mesh_id", translate("Mesh Id"))
 meshid:depends({mode="mesh"})
 
-meshfwd = s:taboption("advanced", Flag, "mesh_fwding", translate("Forward mesh peer traffic"))
+meshfwd = s:taboption("advanced", Flag, "mesh_fwding", translate("internal forwarding of Mesh-peers"))
 meshfwd.rmempty = false
 meshfwd.default = "1"
 meshfwd:depends({mode="mesh"})
@@ -398,30 +445,27 @@ network.novirtual = true
 function network.write(self, section, value)
 	local i = nw:get_interface(section)
 	if i then
-		local _, net, old, new = nil, nil, {}, {}
-
-		for _, net in ipairs(i:get_networks()) do
-			old[net:name()] = true
-		end
-
-		for net in ut.imatch(value) do
-			new[net] = true
-			if not old[net] then
-				local n = nw:get_network(net) or nw:add_network(net, { proto = "none" })
+		if value == '-' then
+			value = m:formvalue(self:cbid(section) .. ".newnet")
+			if value and #value > 0 then
+				local n = nw:add_network(value, {proto="none"})
+				if n then n:add_interface(i) end
+			else
+				local n = i:get_network()
+				if n then n:del_interface(i) end
+			end
+		else
+			local v
+			for _, v in ipairs(i:get_networks()) do
+				v:del_interface(i)
+			end
+			for v in ut.imatch(value) do
+				local n = nw:get_network(v)
 				if n then
 					if not n:is_empty() then
 						n:set("type", "bridge")
 					end
 					n:add_interface(i)
-				end
-			end
-		end
-
-		for net, _ in pairs(old) do
-			if not new[net] then
-				local n = nw:get_network(net)
-				if n then
-					n:del_interface(i)
 				end
 			end
 		end
@@ -492,25 +536,106 @@ if hwtype == "mac80211" then
 	wmm:depends({mode="ap-wds"})
 	wmm.default = wmm.enabled
 
-	isolate = s:taboption("advanced", Flag, "isolate", translate("Isolate Clients"),
-	 translate("Prevents client-to-client communication"))
+	isolate = s:taboption("advanced", Flag, "isolate", translate("Isolate Clients"), translate("Prevents client-to-client communication"))
 	isolate:depends({mode="ap"})
 	isolate:depends({mode="ap-wds"})
 
 	ifname = s:taboption("advanced", Value, "ifname", translate("Interface name"), translate("Override default interface name"))
 	ifname.optional = true
+end
 
-	short_preamble = s:taboption("advanced", Flag, "short_preamble", translate("Short Preamble"))
-	short_preamble.default = short_preamble.enabled
 
-	dtim_period = s:taboption("advanced", Value, "dtim_period", translate("DTIM Interval"), translate("Delivery Traffic Indication Message Interval"))
-	dtim_period.optional = true
-	dtim_period.placeholder = 2
-	dtim_period.datatype = "range(1,255)"
 
-	disassoc_low_ack = s:taboption("advanced", Flag, "disassoc_low_ack", translate("Disassociate On Low Acknowledgement"),
-		translate("Allow AP mode to disconnect STAs based on low ACK condition"))
-	disassoc_low_ack.default = disassoc_low_ack.enabled
+-------------------- Madwifi Interface ----------------------
+
+if hwtype == "atheros" then
+	mode:value("ahdemo", translate("Pseudo Ad-Hoc (ahdemo)"))
+	mode:value("monitor", translate("Monitor"))
+	mode:value("ap-wds", "%s (%s)" % {translate("Access Point"), translate("WDS")})
+	mode:value("sta-wds", "%s (%s)" % {translate("Client"), translate("WDS")})
+	mode:value("wds", translate("Static WDS"))
+
+	function mode.write(self, section, value)
+		if value == "ap-wds" then
+			ListValue.write(self, section, "ap")
+			m.uci:set("wireless", section, "wds", 1)
+		elseif value == "sta-wds" then
+			ListValue.write(self, section, "sta")
+			m.uci:set("wireless", section, "wds", 1)
+		else
+			ListValue.write(self, section, value)
+			m.uci:delete("wireless", section, "wds")
+		end
+	end
+
+	function mode.cfgvalue(self, section)
+		local mode = ListValue.cfgvalue(self, section)
+		local wds  = m.uci:get("wireless", section, "wds") == "1"
+
+		if mode == "ap" and wds then
+			return "ap-wds"
+		elseif mode == "sta" and wds then
+			return "sta-wds"
+		else
+			return mode
+		end
+	end
+
+	bssid:depends({mode="adhoc"})
+	bssid:depends({mode="ahdemo"})
+	bssid:depends({mode="wds"})
+
+	wdssep = s:taboption("advanced", Flag, "wdssep", translate("Separate WDS"))
+	wdssep:depends({mode="ap-wds"})
+
+	s:taboption("advanced", Flag, "doth", "802.11h")
+	hidden = s:taboption("general", Flag, "hidden", translate("Hide <abbr title=\"Extended Service Set Identifier\">ESSID</abbr>"))
+	hidden:depends({mode="ap"})
+	hidden:depends({mode="adhoc"})
+	hidden:depends({mode="ap-wds"})
+	hidden:depends({mode="sta-wds"})
+	isolate = s:taboption("advanced", Flag, "isolate", translate("Separate Clients"),
+	 translate("Prevents client-to-client communication"))
+	isolate:depends({mode="ap"})
+	s:taboption("advanced", Flag, "bgscan", translate("Background Scan"))
+
+	mp = s:taboption("macfilter", ListValue, "macpolicy", translate("MAC-Address Filter"))
+	mp:value("", translate("disable"))
+	mp:value("allow", translate("Allow listed only"))
+	mp:value("deny", translate("Allow all except listed"))
+
+	ml = s:taboption("macfilter", DynamicList, "maclist", translate("MAC-List"))
+	ml.datatype = "macaddr"
+	ml:depends({macpolicy="allow"})
+	ml:depends({macpolicy="deny"})
+	nt.mac_hints(function(mac, name) ml:value(mac, "%s (%s)" %{ mac, name }) end)
+
+	s:taboption("advanced", Value, "rate", translate("Transmission Rate"))
+	s:taboption("advanced", Value, "mcast_rate", translate("Multicast Rate"))
+	s:taboption("advanced", Value, "frag", translate("Fragmentation Threshold"))
+	s:taboption("advanced", Value, "rts", translate("RTS/CTS Threshold"))
+	s:taboption("advanced", Value, "minrate", translate("Minimum Rate"))
+	s:taboption("advanced", Value, "maxrate", translate("Maximum Rate"))
+	s:taboption("advanced", Flag, "compression", translate("Compression"))
+
+	s:taboption("advanced", Flag, "bursting", translate("Frame Bursting"))
+	s:taboption("advanced", Flag, "turbo", translate("Turbo Mode"))
+	s:taboption("advanced", Flag, "ff", translate("Fast Frames"))
+
+	s:taboption("advanced", Flag, "wmm", translate("WMM Mode"))
+	s:taboption("advanced", Flag, "xr", translate("XR Support"))
+	s:taboption("advanced", Flag, "ar", translate("AR Support"))
+
+	local swm = s:taboption("advanced", Flag, "sw_merge", translate("Disable HW-Beacon timer"))
+	swm:depends({mode="adhoc"})
+
+	local nos = s:taboption("advanced", Flag, "nosbeacon", translate("Disable HW-Beacon timer"))
+	nos:depends({mode="sta"})
+	nos:depends({mode="sta-wds"})
+
+	local probereq = s:taboption("advanced", Flag, "probereq", translate("Do not send probe responses"))
+	probereq.enabled  = "0"
+	probereq.disabled = "1"
 end
 
 
@@ -634,7 +759,7 @@ encr:value("none", "No Encryption")
 encr:value("wep-open",   translate("WEP Open System"), {mode="ap"}, {mode="sta"}, {mode="ap-wds"}, {mode="sta-wds"}, {mode="adhoc"}, {mode="ahdemo"}, {mode="wds"})
 encr:value("wep-shared", translate("WEP Shared Key"),  {mode="ap"}, {mode="sta"}, {mode="ap-wds"}, {mode="sta-wds"}, {mode="adhoc"}, {mode="ahdemo"}, {mode="wds"})
 
-if hwtype == "mac80211" or hwtype == "prism2" then
+if hwtype == "atheros" or hwtype == "mac80211" or hwtype == "prism2" then
 	local supplicant = fs.access("/usr/sbin/wpa_supplicant")
 	local hostapd = fs.access("/usr/sbin/hostapd")
 
@@ -643,9 +768,9 @@ if hwtype == "mac80211" or hwtype == "prism2" then
 	local has_sta_eap = (os.execute("wpa_supplicant -veap >/dev/null 2>/dev/null") == 0)
 
 	if hostapd and supplicant then
-		encr:value("psk", "WPA-PSK", {mode="ap"}, {mode="sta"}, {mode="ap-wds"}, {mode="sta-wds"}, {mode="adhoc"})
-		encr:value("psk2", "WPA2-PSK", {mode="ap"}, {mode="sta"}, {mode="ap-wds"}, {mode="sta-wds"}, {mode="adhoc"})
-		encr:value("psk-mixed", "WPA-PSK/WPA2-PSK Mixed Mode", {mode="ap"}, {mode="sta"}, {mode="ap-wds"}, {mode="sta-wds"}, {mode="adhoc"})
+		encr:value("psk", "WPA-PSK", {mode="ap"}, {mode="sta"}, {mode="ap-wds"}, {mode="sta-wds"})
+		encr:value("psk2", "WPA2-PSK", {mode="ap"}, {mode="sta"}, {mode="ap-wds"}, {mode="sta-wds"})
+		encr:value("psk-mixed", "WPA-PSK/WPA2-PSK Mixed Mode", {mode="ap"}, {mode="sta"}, {mode="ap-wds"}, {mode="sta-wds"})
 		if has_ap_eap and has_sta_eap then
 			encr:value("wpa", "WPA-EAP", {mode="ap"}, {mode="sta"}, {mode="ap-wds"}, {mode="sta-wds"})
 			encr:value("wpa2", "WPA2-EAP", {mode="ap"}, {mode="sta"}, {mode="ap-wds"}, {mode="sta-wds"})
@@ -663,9 +788,9 @@ if hwtype == "mac80211" or hwtype == "prism2" then
 			"and ad-hoc mode) to be installed."
 		)
 	elseif not hostapd and supplicant then
-		encr:value("psk", "WPA-PSK", {mode="sta"}, {mode="sta-wds"}, {mode="adhoc"})
-		encr:value("psk2", "WPA2-PSK", {mode="sta"}, {mode="sta-wds"}, {mode="adhoc"})
-		encr:value("psk-mixed", "WPA-PSK/WPA2-PSK Mixed Mode", {mode="sta"}, {mode="sta-wds"}, {mode="adhoc"})
+		encr:value("psk", "WPA-PSK", {mode="sta"}, {mode="sta-wds"})
+		encr:value("psk2", "WPA2-PSK", {mode="sta"}, {mode="sta-wds"})
+		encr:value("psk-mixed", "WPA-PSK/WPA2-PSK Mixed Mode", {mode="sta"}, {mode="sta-wds"})
 		if has_sta_eap then
 			encr:value("wpa", "WPA-EAP", {mode="sta"}, {mode="sta-wds"})
 			encr:value("wpa2", "WPA2-EAP", {mode="sta"}, {mode="sta-wds"})
@@ -795,7 +920,7 @@ for slot=1,4 do
 end
 
 
-if hwtype == "mac80211" or hwtype == "prism2" then
+if hwtype == "atheros" or hwtype == "mac80211" or hwtype == "prism2" then
 
 	-- Probe 802.11r support (and EAP support as a proxy for Openwrt)
 	local has_80211r = (os.execute("hostapd -v11r 2>/dev/null || hostapd -veap 2>/dev/null") == 0)
@@ -812,9 +937,6 @@ if hwtype == "mac80211" or hwtype == "prism2" then
 		ieee80211r:depends({mode="ap", encryption="psk"})
 		ieee80211r:depends({mode="ap", encryption="psk2"})
 		ieee80211r:depends({mode="ap", encryption="psk-mixed"})
-		ieee80211r:depends({mode="ap-wds", encryption="psk"})
-		ieee80211r:depends({mode="ap-wds", encryption="psk2"})
-		ieee80211r:depends({mode="ap-wds", encryption="psk-mixed"})
 	end
 	ieee80211r.rmempty = true
 
@@ -836,27 +958,6 @@ if hwtype == "mac80211" or hwtype == "prism2" then
 	mobility_domain.datatype = "and(hexstring,rangelength(4,4))"
 	mobility_domain.rmempty = true
 
-	reassociation_deadline = s:taboption("encryption", Value, "reassociation_deadline",
-		translate("Reassociation Deadline"),
-		translate("time units (TUs / 1.024 ms) [1000-65535]"))
-	reassociation_deadline:depends({ieee80211r="1"})
-	reassociation_deadline.placeholder = "1000"
-	reassociation_deadline.datatype = "range(1000,65535)"
-	reassociation_deadline.rmempty = true
-
-	ft_protocol = s:taboption("encryption", ListValue, "ft_over_ds", translate("FT protocol"))
-	ft_protocol:depends({ieee80211r="1"})
-	ft_protocol:value("1", translatef("FT over DS"))
-	ft_protocol:value("0", translatef("FT over the Air"))
-	ft_protocol.rmempty = true
-
-	ft_psk_generate_local = s:taboption("encryption", Flag, "ft_psk_generate_local",
-		translate("Generate PMK locally"),
-		translate("When using a PSK, the PMK can be automatically generated. When enabled, the R0/R1 key options below are not applied. Disable this to use the R0 and R1 key options."))
-	ft_psk_generate_local:depends({ieee80211r="1"})
-	ft_psk_generate_local.default = ft_psk_generate_local.enabled
-	ft_psk_generate_local.rmempty = false
-
 	r0_key_lifetime = s:taboption("encryption", Value, "r0_key_lifetime",
 			translate("R0 Key Lifetime"), translate("minutes"))
 	r0_key_lifetime:depends({ieee80211r="1"})
@@ -872,6 +973,14 @@ if hwtype == "mac80211" or hwtype == "prism2" then
 	r1_key_holder.datatype = "and(hexstring,rangelength(12,12))"
 	r1_key_holder.rmempty = true
 
+	reassociation_deadline = s:taboption("encryption", Value, "reassociation_deadline",
+		translate("Reassociation Deadline"),
+		translate("time units (TUs / 1.024 ms) [1000-65535]"))
+	reassociation_deadline:depends({ieee80211r="1"})
+	reassociation_deadline.placeholder = "1000"
+	reassociation_deadline.datatype = "range(1000,65535)"
+	reassociation_deadline.rmempty = true
+
 	pmk_r1_push = s:taboption("encryption", Flag, "pmk_r1_push", translate("PMK R1 Push"))
 	pmk_r1_push:depends({ieee80211r="1"})
 	pmk_r1_push.placeholder = "0"
@@ -883,6 +992,7 @@ if hwtype == "mac80211" or hwtype == "prism2" then
 			"<br />This list is used to map R0KH-ID (NAS Identifier) to a destination " ..
 			"MAC address when requesting PMK-R1 key from the R0KH that the STA " ..
 			"used during the Initial Mobility Domain Association."))
+
 	r0kh:depends({ieee80211r="1"})
 	r0kh.rmempty = true
 
@@ -1056,8 +1166,8 @@ if hwtype == "mac80211" then
 		ieee80211w:depends({mode="ap-wds", encryption="psk-mixed"})
 
 		max_timeout = s:taboption("encryption", Value, "ieee80211w_max_timeout",
-				translate("802.11w maximum timeout"),
-				translate("802.11w Association SA Query maximum timeout"))
+			translate("802.11w maximum timeout"),
+			translate("802.11w Association SA Query maximum timeout"))
 		max_timeout:depends({ieee80211w="1"})
 		max_timeout:depends({ieee80211w="2"})
 		max_timeout.datatype = "uinteger"
@@ -1065,8 +1175,8 @@ if hwtype == "mac80211" then
 		max_timeout.rmempty = true
 
 		retry_timeout = s:taboption("encryption", Value, "ieee80211w_retry_timeout",
-				translate("802.11w retry timeout"),
-				translate("802.11w Association SA Query retry timeout"))
+			translate("802.11w retry timeout"),
+			translate("802.11w Association SA Query retry timeout"))
 		retry_timeout:depends({ieee80211w="1"})
 		retry_timeout:depends({ieee80211w="2"})
 		retry_timeout.datatype = "uinteger"
@@ -1074,7 +1184,7 @@ if hwtype == "mac80211" then
 		retry_timeout.rmempty = true
 	end
 
-	key_retries = s:taboption("encryption", Flag, "wpa_disable_eapol_key_retries",
+	local key_retries = s:taboption("encryption", Flag, "wpa_disable_eapol_key_retries",
 		translate("Enable key reinstallation (KRACK) countermeasures"),
 		translate("Complicates key reinstallation attacks on the client side by disabling retransmission of EAPOL-Key frames that are used to install keys. This workaround might cause interoperability issues and reduced robustness of key negotiation especially in environments with heavy traffic load."))
 
@@ -1086,7 +1196,7 @@ if hwtype == "mac80211" then
 	key_retries:depends({mode="ap-wds", encryption="psk-mixed"})
 end
 
-if hwtype == "mac80211" or hwtype == "prism2" then
+if hwtype == "atheros" or hwtype == "mac80211" or hwtype == "prism2" then
 	local wpasupplicant = fs.access("/usr/sbin/wpa_supplicant")
 	local hostcli = fs.access("/usr/sbin/hostapd_cli")
 	if hostcli and wpasupplicant then
