@@ -496,7 +496,7 @@ if hwtype == "mac80211" then
 	ml.datatype = "macaddr"
 	ml:depends({macfilter="allow"})
 	ml:depends({macfilter="deny"})
-	nt.mac_hints(function(mac, name) ml:value(mac, "%s (%s)" %{ mac, name }) end)
+--	nt.mac_hints(function(mac, name) ml:value(mac, "%s (%s)" %{ mac, name }) end)
 
 	mode:value("ap-wds", "%s (%s)" % {translate("Access Point"), translate("WDS")})
 	mode:value("sta-wds", "%s (%s)" % {translate("Client"), translate("WDS")})
