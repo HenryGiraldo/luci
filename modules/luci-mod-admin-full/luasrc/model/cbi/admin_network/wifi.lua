@@ -923,7 +923,7 @@ end
 if hwtype == "atheros" or hwtype == "mac80211" or hwtype == "prism2" then
 
 	-- Probe 802.11r support (and EAP support as a proxy for Openwrt)
-	local has_80211r = (os.execute("hostapd -v11r 2>/dev/null || hostapd -veap 2>/dev/null") == 0)
+	-- local has_80211r = (os.execute("hostapd -v11r 2>/dev/null || hostapd -veap 2>/dev/null") == 0)
 
 	ieee80211r = s:taboption("encryption", Flag, "ieee80211r",
 		translate("802.11r Fast Transition"),
