@@ -420,6 +420,14 @@ meshfwd.rmempty = false
 meshfwd.default = "1"
 meshfwd:depends({mode="mesh"})
 
+mesh_rssi_th = s:taboption("advanced", Value, "mesh_rssi_threshold",
+	translate("RSSI threshold for joining"),
+	translate("0 = not using RSSI threshold, 1 = do not change driver default"))
+mesh_rssi_th.rmempty = false
+mesh_rssi_th.default = "0"
+mesh_rssi_th.datatype = "range(-255,1)"
+mesh_rssi_th:depends({mode="mesh"})
+
 ssid = s:taboption("general", Value, "ssid", translate("<abbr title=\"Extended Service Set Identifier\">ESSID</abbr>"))
 ssid.datatype = "maxlength(32)"
 ssid:depends({mode="ap"})
@@ -771,6 +779,7 @@ if hwtype == "atheros" or hwtype == "mac80211" or hwtype == "prism2" then
 		encr:value("psk", "WPA-PSK", {mode="ap"}, {mode="sta"}, {mode="ap-wds"}, {mode="sta-wds"})
 		encr:value("psk2", "WPA2-PSK", {mode="ap"}, {mode="sta"}, {mode="ap-wds"}, {mode="sta-wds"})
 		encr:value("psk-mixed", "WPA-PSK/WPA2-PSK Mixed Mode", {mode="ap"}, {mode="sta"}, {mode="ap-wds"}, {mode="sta-wds"})
+		encr:value("psksae", "SAE", {mode="mesh"})
 		if has_ap_eap and has_sta_eap then
 			encr:value("wpa", "WPA-EAP", {mode="ap"}, {mode="sta"}, {mode="ap-wds"}, {mode="sta-wds"})
 			encr:value("wpa2", "WPA2-EAP", {mode="ap"}, {mode="sta"}, {mode="ap-wds"}, {mode="sta-wds"})
@@ -791,6 +800,7 @@ if hwtype == "atheros" or hwtype == "mac80211" or hwtype == "prism2" then
 		encr:value("psk", "WPA-PSK", {mode="sta"}, {mode="sta-wds"})
 		encr:value("psk2", "WPA2-PSK", {mode="sta"}, {mode="sta-wds"})
 		encr:value("psk-mixed", "WPA-PSK/WPA2-PSK Mixed Mode", {mode="sta"}, {mode="sta-wds"})
+		encr:value("psksae", "SAE", {mode="mesh"})
 		if has_sta_eap then
 			encr:value("wpa", "WPA-EAP", {mode="sta"}, {mode="sta-wds"})
 			encr:value("wpa2", "WPA2-EAP", {mode="sta"}, {mode="sta-wds"})
@@ -919,6 +929,20 @@ for slot=1,4 do
 	end
 end
 
+saekey = s:taboption("encryption", Value, "_sae_key", translate("Key"))
+saekey:depends("encryption", "psksae")
+saekey.rmempty = true
+saekey.datatype = "wpakey"
+saekey.password = true
+
+saekey.cfgvalue = function(self, section, value)
+        local key = m.uci:get("wireless", section, "key")
+        return key
+end
+
+saekey.write = function(self, section, value)
+        self.map.uci:set("wireless", section, "key", value)
+end
 
 if hwtype == "atheros" or hwtype == "mac80211" or hwtype == "prism2" then
 
